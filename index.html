@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Daily Milk Tracker</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+        }
+        .icon {
+            width: 20px;
+            height: 20px;
+            stroke: currentColor;
+            stroke-width: 2;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const MilkTracker = () => {
+            const [records, setRecords] = useState([]);
+            const [showForm, setShowForm] = useState(false);
+            const [editingId, setEditingId] = useState(null);
+            const [storageStatus, setStorageStatus] = useState('Checking storage...');
+            const [formData, setFormData] = useState({
+                date: new Date().toISOString().split('T')[0],
+                quantity: '',
+                pricePerLitre: '',
+                totalAmount: ''
+            });
+            const [summaryPeriod, setSummaryPeriod] = useState('currentMonth');
+
+            // Detect if running on iPhone
+            const isIPhone = /iPhone|iPad|iPod/.test(navigator.userAgent);
+            const isStandalone = window.navigator.standalone === true;
+
+            // Load data on start with proper persistence
+            useEffect(() => {
+                loadData();
+                checkStorageCapability();
+            }, []);
+
+            // Check storage capability and show status
+            const checkStorageCapability = () => {
+                if (isIPhone && isStandalone) {
+                    setStorageStatus('📱 iPhone PWA - Data will persist');
+                } else if (isIPhone && !isStandalone) {
+                    setStorageStatus('⚠️ iPhone Safari - Add to Home Screen for best storage');
+                } else {
+                    setStorageStatus('💾 Data storage enabled');
+                }
+            };
+
+            // Save data whenever records change with confirmation
+            useEffect(() => {
+                if (records.length > 0) {
+                    saveData(records);
+                    setStorageStatus(`💾 Saved ${records.length} records successfully`);
+                    setTimeout(() => checkStorageCapability(), 2000);
+                }
+            }, [records]);
+
+            // Open IndexedDB
+            const openDB = () => {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open('MilkTrackerDB', 1);
+                    
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => resolve(request.result);
+                    
+                    request.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        if (!db.objectStoreNames.contains('milkRecords')) {
+                            const store = db.createObjectStore('milkRecords', { keyPath: 'id' });
+                            store.createIndex('date', 'date', { unique: false });
+                        }
+                    };
+                });
+            };
+
+            // Load data from browser storage with iPhone-specific handling
+            const loadData = async () => {
+                try {
+                    // For iPhone/Safari, try localStorage first as it's more reliable
+                    const savedData = localStorage.getItem('milkTrackerRecords');
+                    if (savedData) {
+                        const parsedData = JSON.parse(savedData);
+                        setRecords(parsedData);
+                        console.log('Data loaded from localStorage:', parsedData.length, 'records');
+                        return;
+                    }
+                } catch (e) {
+                    console.log('localStorage failed, trying IndexedDB');
+                }
+
+                try {
+                    // Try IndexedDB as backup
+                    const db = await openDB();
+                    const transaction = db.transaction(['milkRecords'], 'readonly');
+                    const store = transaction.objectStore('milkRecords');
+                    const request = store.getAll();
+                    
+                    request.onsuccess = () => {
+                        const data = request.result || [];
+                        setRecords(data);
+                        console.log('Data loaded from IndexedDB:', data.length, 'records');
+                    };
+                } catch (error) {
+                    console.log('Storage not available, using memory only');
+                    // Try to restore from document cookies as last resort for iPhone
+                    try {
+                        const cookieData = document.cookie.split(';').find(c => c.trim().startsWith('milkData='));
+                        if (cookieData) {
+                            const data = JSON.parse(decodeURIComponent(cookieData.split('=')[1]));
+                            setRecords(data);
+                            console.log('Data loaded from cookies:', data.length, 'records');
+                        }
+                    } catch (e) {
+                        console.log('No storage available');
+                    }
+                }
+            };
+
+            // Save data to browser storage with iPhone-specific handling
+            const saveData = async (data) => {
+                try {
+                    // For iPhone/Safari, use localStorage as primary storage
+                    localStorage.setItem('milkTrackerRecords', JSON.stringify(data));
+                    console.log('Data saved to localStorage:', data.length, 'records');
+                    
+                    // Also save to cookies as backup for iPhone
+                    const dataStr = JSON.stringify(data);
+                    if (dataStr.length < 4000) { // Cookie size limit
+                        document.cookie = `milkData=${encodeURIComponent(dataStr)}; expires=Fri, 31 Dec 2030 23:59:59 GMT; path=/`;
+                        console.log('Data also saved to cookies');
+                    }
+                } catch (error) {
+                    console.log('localStorage failed, trying IndexedDB');
+                    try {
+                        // Try IndexedDB as backup
+                        const db = await openDB();
+                        const transaction = db.transaction(['milkRecords'], 'readwrite');
+                        const store = transaction.objectStore('milkRecords');
+                        
+                        // Clear and add all records
+                        await store.clear();
+                        data.forEach(record => store.add(record));
+                        
+                        console.log('Data saved to IndexedDB:', data.length, 'records');
+                    } catch (e) {
+                        console.log('All storage methods failed');
+                        // Last resort: save to window object for session
+                        window.milkTrackerBackup = data;
+                    }
+                }
+            };
+
+            // Calculate total when quantity or price changes
+            useEffect(() => {
+                if (formData.quantity && formData.pricePerLitre) {
+                    const total = (parseFloat(formData.quantity) * parseFloat(formData.pricePerLitre)).toFixed(2);
+                    setFormData(prev => ({ ...prev, totalAmount: total }));
+                }
+            }, [formData.quantity, formData.pricePerLitre]);
+
+            const handleInputChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const handleSubmit = () => {
+                if (!formData.date || !formData.quantity || !formData.pricePerLitre) {
+                    alert('Please fill in all fields');
+                    return;
+                }
+
+                const newRecord = {
+                    id: editingId || Date.now(),
+                    date: formData.date,
+                    quantity: parseFloat(formData.quantity),
+                    pricePerLitre: parseFloat(formData.pricePerLitre),
+                    totalAmount: parseFloat(formData.totalAmount)
+                };
+
+                let newRecords;
+                if (editingId) {
+                    newRecords = records.map(record => 
+                        record.id === editingId ? newRecord : record
+                    );
+                    setEditingId(null);
+                } else {
+                    newRecords = [...records, newRecord];
+                }
+
+                setRecords(newRecords);
+                setFormData({
+                    date: new Date().toISOString().split('T')[0],
+                    quantity: '',
+                    pricePerLitre: '',
+                    totalAmount: ''
+                });
+                setShowForm(false);
+            };
+
+            const handleEdit = (record) => {
+                setFormData({
+                    date: record.date,
+                    quantity: record.quantity.toString(),
+                    pricePerLitre: record.pricePerLitre.toString(),
+                    totalAmount: record.totalAmount.toString()
+                });
+                setEditingId(record.id);
+                setShowForm(true);
+            };
+
+            const handleDelete = (id) => {
+                if (window.confirm('Are you sure you want to delete this record?')) {
+                    const newRecords = records.filter(record => record.id !== id);
+                    setRecords(newRecords);
+                }
+            };
+
+            const cancelEdit = () => {
+                setEditingId(null);
+                setShowForm(false);
+                setFormData({
+                    date: new Date().toISOString().split('T')[0],
+                    quantity: '',
+                    pricePerLitre: '',
+                    totalAmount: ''
+                });
+            };
+
+            const getDateRange = (period) => {
+                const today = new Date();
+                const currentYear = today.getFullYear();
+                let startDate, endDate;
+
+                switch (period) {
+                    case 'currentMonth':
+                        startDate = new Date(currentYear, today.getMonth(), 1);
+                        endDate = new Date(currentYear, today.getMonth() + 1, 0);
+                        break;
+                    case 'january':
+                        startDate = new Date(currentYear, 0, 1);
+                        endDate = new Date(currentYear, 0, 31);
+                        break;
+                    case 'february':
+                        startDate = new Date(currentYear, 1, 1);
+                        endDate = new Date(currentYear, 1, 28);
+                        break;
+                    case 'march':
+                        startDate = new Date(currentYear, 2, 1);
+                        endDate = new Date(currentYear, 2, 31);
+                        break;
+                    case 'april':
+                        startDate = new Date(currentYear, 3, 1);
+                        endDate = new Date(currentYear, 3, 30);
+                        break;
+                    case 'may':
+                        startDate = new Date(currentYear, 4, 1);
+                        endDate = new Date(currentYear, 4, 31);
+                        break;
+                    case 'june':
+                        startDate = new Date(currentYear, 5, 1);
+                        endDate = new Date(currentYear, 5, 30);
+                        break;
+                    case 'july':
+                        startDate = new Date(currentYear, 6, 1);
+                        endDate = new Date(currentYear, 6, 31);
+                        break;
+                    case 'august':
+                        startDate = new Date(currentYear, 7, 1);
+                        endDate = new Date(currentYear, 7, 31);
+                        break;
+                    case 'september':
+                        startDate = new Date(currentYear, 8, 1);
+                        endDate = new Date(currentYear, 8, 30);
+                        break;
+                    case 'october':
+                        startDate = new Date(currentYear, 9, 1);
+                        endDate = new Date(currentYear, 9, 31);
+                        break;
+                    case 'november':
+                        startDate = new Date(currentYear, 10, 1);
+                        endDate = new Date(currentYear, 10, 30);
+                        break;
+                    case 'december':
+                        startDate = new Date(currentYear, 11, 1);
+                        endDate = new Date(currentYear, 11, 31);
+                        break;
+                    case 'lastMonth':
+                        const lastMonth = today.getMonth() - 1;
+                        const lastMonthYear = lastMonth < 0 ? currentYear - 1 : currentYear;
+                        const adjustedLastMonth = lastMonth < 0 ? 11 : lastMonth;
+                        startDate = new Date(lastMonthYear, adjustedLastMonth, 1);
+                        endDate = new Date(lastMonthYear, adjustedLastMonth + 1, 0);
+                        break;
+                    case 'yearToDate':
+                        startDate = new Date(currentYear, 0, 1);
+                        endDate = today;
+                        break;
+                    default:
+                        startDate = new Date(currentYear, today.getMonth(), 1);
+                        endDate = new Date(currentYear, today.getMonth() + 1, 0);
+                }
+
+                return { startDate, endDate };
+            };
+
+            const calculateSummary = (period) => {
+                const { startDate, endDate } = getDateRange(period);
+                
+                const filteredRecords = records.filter(record => {
+                    const recordDate = new Date(record.date);
+                    return recordDate >= startDate && recordDate <= endDate;
+                });
+
+                const totalQuantity = filteredRecords.reduce((sum, record) => sum + record.quantity, 0);
+                const totalAmount = filteredRecords.reduce((sum, record) => sum + record.totalAmount, 0);
+                const averagePrice = totalQuantity > 0 ? totalAmount / totalQuantity : 0;
+
+                return {
+                    totalQuantity: totalQuantity.toFixed(2),
+                    totalAmount: totalAmount.toFixed(2),
+                    averagePrice: averagePrice.toFixed(2),
+                    recordCount: filteredRecords.length
+                };
+            };
+
+            const exportData = () => {
+                const dataStr = JSON.stringify(records, null, 2);
+                const dataBlob = new Blob([dataStr], { type: 'application/json' });
+                const url = URL.createObjectURL(dataBlob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `milk-records-${new Date().toISOString().split('T')[0]}.json`;
+                link.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const sortedRecords = [...records].sort((a, b) => new Date(b.date) - new Date(a.date));
+            const summary = calculateSummary(summaryPeriod);
+
+            return (
+                <div style={{minHeight: '100vh', background: 'linear-gradient(135deg, #e0f2fe 0%, #e8f5e8 100%)', padding: '16px'}}>
+                    <div style={{maxWidth: '1200px', margin: '0 auto'}}>
+                        <div style={{background: 'white', borderRadius: '12px', boxShadow: '0 4px 6px rgba(0,0,0,0.1)', padding: '24px', marginBottom: '24px'}}>
+                            
+                            {/* Storage Status */}
+                            <div style={{marginBottom: '16px', padding: '8px 12px', background: '#f0f9ff', borderRadius: '6px', fontSize: '12px', textAlign: 'center', color: '#0369a1'}}>
+                                {storageStatus}
+                            </div>
+
+                            {/* Header */}
+                            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px', flexWrap: 'wrap', gap: '12px'}}>
+                                <h1 style={{fontSize: '28px', fontWeight: 'bold', color: '#1f2937', margin: 0}}>🥛 Daily Milk Tracker</h1>
+                                <div style={{display: 'flex', gap: '8px', flexWrap: 'wrap'}}>
+                                    <button
+                                        onClick={() => setShowForm(!showForm)}
+                                        style={{background: '#2563eb', color: 'white', padding: '12px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '14px', fontWeight: '500'}}
+                                    >
+                                        ➕ Add Record
+                                    </button>
+                                    <button
+                                        onClick={exportData}
+                                        style={{background: '#059669', color: 'white', padding: '12px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '14px'}}
+                                        title="Export Data"
+                                    >
+                                        📥 Export
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Add/Edit Form */}
+                            {showForm && (
+                                <div style={{background: '#f9fafb', borderRadius: '8px', padding: '24px', marginBottom: '24px'}}>
+                                    <h3 style={{fontSize: '18px', fontWeight: '600', marginBottom: '16px', color: '#374151'}}>
+                                        {editingId ? 'Edit Record' : 'Add New Record'}
+                                    </h3>
+                                    <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px'}}>
+                                        <div>
+                                            <label style={{display: 'block', fontSize: '14px', fontWeight: '500', color: '#374151', marginBottom: '4px'}}>Date</label>
+                                            <input
+                                                type="date"
+                                                name="date"
+                                                value={formData.date}
+                                                onChange={handleInputChange}
+                                                style={{width: '100%', padding: '8px 12px', border: '2px solid #d1d5db', borderRadius: '6px', fontSize: '14px'}}
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label style={{display: 'block', fontSize: '14px', fontWeight: '500', color: '#374151', marginBottom: '4px'}}>Quantity (Litres)</label>
+                                            <input
+                                                type="number"
+                                                name="quantity"
+                                                value={formData.quantity}
+                                                onChange={handleInputChange}
+                                                step="0.01"
+                                                min="0"
+                                                placeholder="e.g. 2.5"
+                                                style={{width: '100%', padding: '8px 12px', border: '2px solid #d1d5db', borderRadius: '6px', fontSize: '14px'}}
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label style={{display: 'block', fontSize: '14px', fontWeight: '500', color: '#374151', marginBottom: '4px'}}>Price per Litre (₹)</label>
+                                            <input
+                                                type="number"
+                                                name="pricePerLitre"
+                                                value={formData.pricePerLitre}
+                                                onChange={handleInputChange}
+                                                step="0.01"
+                                                min="0"
+                                                placeholder="e.g. 45.00"
+                                                style={{width: '100%', padding: '8px 12px', border: '2px solid #d1d5db', borderRadius: '6px', fontSize: '14px'}}
+                                                required
+                                            />
+                                        </div>
+                                        <div>
+                                            <label style={{display: 'block', fontSize: '14px', fontWeight: '500', color: '#374151', marginBottom: '4px'}}>Total Amount (₹)</label>
+                                            <input
+                                                type="number"
+                                                name="totalAmount"
+                                                value={formData.totalAmount}
+                                                readOnly
+                                                style={{width: '100%', padding: '8px 12px', border: '2px solid #d1d5db', borderRadius: '6px', fontSize: '14px', background: '#f3f4f6'}}
+                                                placeholder="Auto-calculated"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div style={{marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap'}}>
+                                        <button
+                                            onClick={handleSubmit}
+                                            style={{background: '#059669', color: 'white', padding: '10px 16px', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '14px', fontWeight: '500'}}
+                                        >
+                                            💾 {editingId ? 'Update Record' : 'Save Record'}
+                                        </button>
+                                        <button
+                                            onClick={cancelEdit}
+                                            style={{background: '#6b7280', color: 'white', padding: '10px 16px', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '14px'}}
+                                        >
+                                            ❌ Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Summary Section */}
+                            <div style={{background: 'linear-gradient(135deg, #dcfce7 0%, #dbeafe 100%)', borderRadius: '8px', padding: '24px', marginBottom: '24px'}}>
+                                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px'}}>
+                                    <h3 style={{fontSize: '18px', fontWeight: '600', color: '#374151', margin: 0}}>📊 Summary</h3>
+                                    <select
+                                        value={summaryPeriod}
+                                        onChange={(e) => setSummaryPeriod(e.target.value)}
+                                        style={{padding: '8px 12px', border: '2px solid #d1d5db', borderRadius: '6px', fontSize: '14px'}}
+                                    >
+                                        <option value="currentMonth">Current Month</option>
+                                        <option value="lastMonth">Last Month</option>
+                                        <option value="january">January</option>
+                                        <option value="february">February</option>
+                                        <option value="march">March</option>
+                                        <option value="april">April</option>
+                                        <option value="may">May</option>
+                                        <option value="june">June</option>
+                                        <option value="july">July</option>
+                                        <option value="august">August</option>
+                                        <option value="september">September</option>
+                                        <option value="october">October</option>
+                                        <option value="november">November</option>
+                                        <option value="december">December</option>
+                                        <option value="yearToDate">Year to Date</option>
+                                    </select>
+                                </div>
+                                <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '16px'}}>
+                                    <div style={{background: 'white', borderRadius: '8px', padding: '16px', textAlign: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.1)'}}>
+                                        <div style={{fontSize: '24px', fontWeight: 'bold', color: '#2563eb'}}>{summary.totalQuantity}L</div>
+                                        <div style={{fontSize: '12px', color: '#6b7280'}}>Total Quantity</div>
+                                    </div>
+                                    <div style={{background: 'white', borderRadius: '8px', padding: '16px', textAlign: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.1)'}}>
+                                        <div style={{fontSize: '24px', fontWeight: 'bold', color: '#059669'}}>₹{summary.totalAmount}</div>
+                                        <div style={{fontSize: '12px', color: '#6b7280'}}>Total Amount</div>
+                                    </div>
+                                    <div style={{background: 'white', borderRadius: '8px', padding: '16px', textAlign: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.1)'}}>
+                                        <div style={{fontSize: '24px', fontWeight: 'bold', color: '#7c3aed'}}>₹{summary.averagePrice}</div>
+                                        <div style={{fontSize: '12px', color: '#6b7280'}}>Avg Price/Litre</div>
+                                    </div>
+                                    <div style={{background: 'white', borderRadius: '8px', padding: '16px', textAlign: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.1)'}}>
+                                        <div style={{fontSize: '24px', fontWeight: 'bold', color: '#ea580c'}}>{summary.recordCount}</div>
+                                        <div style={{fontSize: '12px', color: '#6b7280'}}>Total Records</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Records Table */}
+                            <div style={{background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden'}}>
+                                <div style={{padding: '16px 24px', borderBottom: '1px solid #e5e7eb'}}>
+                                    <h3 style={{fontSize: '18px', fontWeight: '600', color: '#374151', margin: 0}}>
+                                        Milk Records ({records.length} total)
+                                    </h3>
+                                </div>
+                                <div style={{overflowX: 'auto'}}>
+                                    <table style={{width: '100%', borderCollapse: 'collapse'}}>
+                                        <thead style={{background: '#f9fafb'}}>
+                                            <tr>
+                                                <th style={{padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '500', color: '#6b7280', textTransform: 'uppercase'}}>Date</th>
+                                                <th style={{padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '500', color: '#6b7280', textTransform: 'uppercase'}}>Quantity (L)</th>
+                                                <th style={{padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '500', color: '#6b7280', textTransform: 'uppercase'}}>Price/L (₹)</th>
+                                                <th style={{padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '500', color: '#6b7280', textTransform: 'uppercase'}}>Total (₹)</th>
+                                                <th style={{padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: '500', color: '#6b7280', textTransform: 'uppercase'}}>Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody style={{background: 'white'}}>
+                                            {sortedRecords.length === 0 ? (
+                                                <tr>
+                                                    <td colSpan="5" style={{padding: '48px 24px', textAlign: 'center', color: '#6b7280'}}>
+                                                        <div>
+                                                            <div style={{fontSize: '48px', marginBottom: '16px'}}>🥛</div>
+                                                            <p style={{fontSize: '18px', fontWeight: '500', margin: '0 0 8px 0'}}>No milk records yet</p>
+                                                            <p style={{fontSize: '14px', margin: 0}}>Click "Add Record" to start tracking your daily milk purchases</p>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ) : (
+                                                sortedRecords.map((record, index) => (
+                                                    <tr key={record.id} style={{borderBottom: '1px solid #f3f4f6', background: index % 2 === 0 ? 'white' : '#f9fafb'}}>
+                                                        <td style={{padding: '16px', fontSize: '14px', fontWeight: '500', color: '#111827'}}>
+                                                            {new Date(record.date).toLocaleDateString('en-IN', {
+                                                                day: '2-digit',
+                                                                month: 'short',
+                                                                year: 'numeric'
+                                                            })}
+                                                        </td>
+                                                        <td style={{padding: '16px', fontSize: '14px', color: '#111827'}}>{record.quantity}</td>
+                                                        <td style={{padding: '16px', fontSize: '14px', color: '#111827'}}>₹{record.pricePerLitre}</td>
+                                                        <td style={{padding: '16px', fontSize: '14px', fontWeight: '500', color: '#111827'}}>₹{record.totalAmount}</td>
+                                                        <td style={{padding: '16px', fontSize: '14px', fontWeight: '500'}}>
+                                                            <div style={{display: 'flex', gap: '8px'}}>
+                                                                <button
+                                                                    onClick={() => handleEdit(record)}
+                                                                    style={{padding: '8px', color: '#2563eb', background: 'transparent', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '16px'}}
+                                                                    title="Edit Record"
+                                                                >
+                                                                    ✏️
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => handleDelete(record.id)}
+                                                                    style={{padding: '8px', color: '#dc2626', background: 'transparent', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '16px'}}
+                                                                    title="Delete Record"
+                                                                >
+                                                                    🗑️
+                                                                </button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                ))
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {records.length > 0 && (
+                                <div style={{marginTop: '16px', textAlign: 'center', fontSize: '14px', color: '#6b7280'}}>
+                                    💡 Tip: Use the export button to backup your data regularly
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<MilkTracker />, document.getElementById('root'));
+    </script>
+</body>
+</html>
